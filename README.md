@@ -16,6 +16,10 @@ and be used from any browser on your network.
 - Every move and return (including dry-runs and failures) is written to
   `license_transfer_changes.log`, with the user who made it.
 
+**Using the app:** see the [User Guide](docs/USER_GUIDE.md), which has screenshots.
+
+![Main page](docs/images/04-licenses.png)
+
 ## Requirements
 
 - Python 3.9+ (Raspberry Pi OS Bookworm ships 3.11)

@@ -31,7 +31,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import license_core as core
 from license_core import TransferError
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_WEB_CONF = BASE_DIR / "web.conf"
