@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card orgs">
+  <div>
+    <div class="label">Source organization</div>
+    <div class="org">{{ s.source_name }}</div>
+    <div class="muted mono">{{ cfg.source_org_id }}</div>
+  </div>
+  <div>
+    <div class="label">Destination organization (for moves)</div>
+    {% if s.destinations|length > 1 %}
+    <form method="post" action="{{ url_for('destination') }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <select name="dest" onchange="this.form.submit()">
+        {% for d, n in s.destinations %}
+        <option value="{{ d }}"{% if d == s.dest_id %} selected{% endif %}>{{ n or 'Unknown (no access)' }} &mdash; {{ d }}</option>
+        {% endfor %}
+      </select>
+      <noscript><button>Select</button></noscript>
+    </form>
+    {% else %}
+    <div class="org">{{ s.dest_name or 'Unknown (no access)' }}</div>
+    {% endif %}
+    <div class="muted mono">{{ s.dest_id }}</div>
+  </div>
+  <div>
+    <div class="label">Mode</div>
+    {% if dry_run_switchable %}
+    <form method="post" action="{{ url_for('toggle_dry_run') }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="on" value="{{ '0' if dry_run else '1' }}">
+      <span class="org">{{ 'Dry-run' if dry_run else 'Live' }}</span>
+      <button class="small">{{ 'Switch to live' if dry_run else 'Switch to dry-run' }}</button>
+    </form>
+    {% else %}
+    <div class="org">Dry-run</div><div class="muted">fixed for this login</div>
+    {% endif %}
+  </div>
+</section>
+
+{% if nothing %}
+<section class="card">
+  {% if no_data %}
+  <p>No license data returned for {{ s.source_name }}.</p>
+  {% else %}
+  <p>Nothing to do: {{ s.source_name }} has no unexpired subscriptions with units left to move, and no previous moves out to return.</p>
+  {% endif %}
+</section>
+{% else %}
+
+<section class="card">
+  <h2>Licenses available to move to {{ s.dest_name or s.dest_id }}</h2>
+  {% if s.licenses %}
+  <div class="scroll">
+  <table>
+    <thead><tr>
+      <th>Subscription ID</th><th>Sub type</th><th class="num">Total</th><th class="num">Avail</th>
+      <th>Start</th><th>End</th><th>Status</th><th>Move</th>
+    </tr></thead>
+    <tbody>
+    {% for l in s.licenses %}
+      <tr>
+        <td class="mono">{{ l.subscription_id }}</td><td>{{ l.type }}</td>
+        <td class="num">{{ l.quantity }}</td><td class="num">{{ l.remaining }}</td>
+        <td>{{ fmt_date(l.start_time) }}</td><td>{{ fmt_date(l.end_time) }}</td>
+        <td><span class="status {{ 'active' if l.status == 'Active' else 'future' }}">{{ l.status }}</span></td>
+        <td>
+          <form method="post" action="{{ url_for('move_confirm') }}" class="inline move">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="subscription_id" value="{{ l.subscription_id }}">
+            <input type="number" name="quantity" min="1" max="{{ l.remaining }}" step="1" required placeholder="1-{{ l.remaining }}" aria-label="Quantity to move">
+            <button class="small">Move&hellip;</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No unexpired subscriptions with units left in {{ s.source_name }}.</p>
+  {% endif %}
+  <p class="muted small">Total = the subscription's full size. Avail = units still in the source org after earlier moves out; you can move up to Avail. Expired subscriptions aren't listed.</p>
+</section>
+
+<section class="card">
+  <h2>Previous moves out (can be returned)</h2>
+  {% if s.known_amendments or (s.unknown_amendments and cfg.allow_unknown_org_returns) %}
+  <div class="scroll">
+  <table>
+    <thead><tr>
+      <th>Subscription ID</th><th>Sub type</th><th class="num">Qty</th><th>Start</th><th>End</th><th>Dest org</th><th>Return</th>
+    </tr></thead>
+    <tbody>
+    {% for a in s.known_amendments %}
+      <tr>
+        <td class="mono">{{ a.subscription_id }}</td><td>{{ a.type }}</td><td class="num">{{ a.quantity }}</td>
+        <td>{{ fmt_date(a.start_time) }}</td><td>{{ fmt_date(a.end_time) }}</td>
+        <td>{{ s.names[a.dst_org_id] }}</td>
+        <td>
+          <form method="post" action="{{ url_for('return_confirm') }}" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="amendment_id" value="{{ a.amendment_id }}">
+            <button class="small">Return&hellip;</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    {% if cfg.allow_unknown_org_returns %}
+    {% for a in s.unknown_amendments %}
+      <tr class="unknown">
+        <td class="mono">{{ a.subscription_id }}</td><td>{{ a.type }}</td><td class="num">{{ a.quantity }}</td>
+        <td>{{ fmt_date(a.start_time) }}</td><td>{{ fmt_date(a.end_time) }}</td>
+        <td><span class="status unknown">Unknown org</span> <span class="mono">{{ a.dst_org_id }}</span></td>
+        <td>
+          <form method="post" action="{{ url_for('return_confirm') }}" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="amendment_id" value="{{ a.amendment_id }}">
+            <button class="small">Return&hellip;</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    {% endif %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No previous moves out of {{ s.source_name }} to return.</p>
+  {% endif %}
+
+  {% if s.unknown_amendments and not cfg.allow_unknown_org_returns %}
+  <h3 class="muted">Moved out to orgs this API token can't access</h3>
+  <p class="muted small">Shown for information &mdash; these can't be returned here.</p>
+  <div class="scroll">
+  <table class="dim">
+    <thead><tr><th>Subscription ID</th><th>Sub type</th><th class="num">Qty</th><th>Start</th><th>End</th><th>Dest org ID</th></tr></thead>
+    <tbody>
+    {% for a in s.unknown_amendments %}
+      <tr>
+        <td class="mono">{{ a.subscription_id }}</td><td>{{ a.type }}</td><td class="num">{{ a.quantity }}</td>
+        <td>{{ fmt_date(a.start_time) }}</td><td>{{ fmt_date(a.end_time) }}</td><td class="mono">{{ a.dst_org_id }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+<p class="right"><a href="{{ url_for('index') }}">Refresh</a></p>
+{% endblock %}

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>Choose a config</h1>
+  {% if rows %}
+  <table>
+    <thead><tr><th>Config file</th><th>Source org</th><th></th></tr></thead>
+    <tbody>
+    {% for name, desc in rows %}
+      <tr{% if name == config_name %} class="selected"{% endif %}>
+        <td>{{ name }}</td><td class="muted">{{ desc }}</td>
+        <td class="right">
+          <form method="post" action="{{ url_for('configs') }}" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="config" value="{{ name }}">
+            <button class="primary">Use</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No config files are available to you.</p>
+  {% endif %}
+</section>
+{% endblock %}

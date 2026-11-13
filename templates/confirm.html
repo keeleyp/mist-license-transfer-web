@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+  <h1>{{ title }}</h1>
+  <table class="kv">
+    {% for k, v in rows %}<tr><th>{{ k }}</th><td>{{ v }}</td></tr>{% endfor %}
+  </table>
+  {% for w in warnings %}<div class="flash warn">{{ w }}</div>{% endfor %}
+  {% if dry_run %}
+  <p class="muted">Dry-run is on: confirming will only simulate this.</p>
+  {% else %}
+  <p><strong>This changes real subscription allocation between orgs.</strong></p>
+  {% endif %}
+  <div class="actions">
+    <form method="post" action="{{ action }}" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="token" value="{{ token }}">
+      <button class="{{ 'primary' if dry_run else 'danger' }}">{{ button }}{% if dry_run %} (dry-run){% endif %}</button>
+    </form>
+    <a class="button" href="{{ url_for('index') }}">Cancel</a>
+  </div>
+</section>
+{% endblock %}

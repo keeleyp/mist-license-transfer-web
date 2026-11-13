@@ -1,0 +1,25 @@
+# Copy to web.conf (gitignored) and add a [user NAME] section per login.
+# Restart the app after editing (sudo systemctl restart mist-license-transfer-web).
+
+[web]
+# 127.0.0.1 = this machine only; 0.0.0.0 = reachable from the network (Pi).
+host = 0.0.0.0
+port = 5030
+# Signed out after this many minutes without using the page.
+session_minutes = 60
+
+# One section per login: [user <name>]
+#   password_hash - make it with:  python3 app.py --hash-password
+#   configs       - the .ini files in this folder this user may use,
+#                   comma-separated, or * for all of them. A user with one
+#                   config goes straight to it; with several they pick.
+#   dry_run_only  - true = this user can only simulate moves/returns.
+[user philip]
+password_hash = PASTE_OUTPUT_OF_hash-password_HERE
+configs = customer-a.ini, customer-b.ini
+dry_run_only = false
+
+[user trainee]
+password_hash = PASTE_OUTPUT_OF_hash-password_HERE
+configs = customer-a.ini
+dry_run_only = true

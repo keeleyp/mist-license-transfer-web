@@ -1,0 +1,10 @@
+# Configs hold API tokens; web.conf holds password hashes. Only templates are tracked.
+*.ini
+!*.ini.example
+web.conf
+*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude/
