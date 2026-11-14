@@ -117,12 +117,21 @@ class AppTestCase(unittest.TestCase):
         patcher = mock.patch.object(requests.Session, "request", autospec=True, side_effect=self.fake)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.app = webapp.create_app(self.web_conf, force_dry_run=self.force_dry_run, config_folder=folder)
+        self.activity_log = folder / "activity.log"
+        self.app = webapp.create_app(self.web_conf, force_dry_run=self.force_dry_run, config_folder=folder,
+                                     activity_log=self.activity_log)
         self.app.testing = True
         self.client = self.app.test_client()
 
     def tearDown(self):
+        webapp.setup_activity_log(Path(self.tmp.name) / "closed.log")  # release the file
         self.tmp.cleanup()
+
+    def activity_lines(self):
+        return self.activity_log.read_text().splitlines() if self.activity_log.exists() else []
+
+    def events(self):
+        return [dict(f.split('=', 1) for f in l.split('\t')[1:]) for l in self.activity_lines()]
 
     def login(self, user="alice", password="correct horse"):
         return self.client.post("/login", data={"username": user, "password": password})
@@ -292,6 +301,59 @@ class TestForcedDryRun(AppTestCase):
 class TestDryRunOnlyUser(TestForcedDryRun):
     force_dry_run = False
     dry_run_only = True
+
+
+class TestActivityLog(AppTestCase):
+    def test_sign_in_failure_and_lockout_logged_with_ip(self):
+        self.login(password="wrong")
+        self.login(user="mallory", password="x")
+        ev = self.events()
+        self.assertEqual(ev[0]["event"], "sign-in failed")
+        self.assertEqual(ev[0]["user"], "alice")
+        self.assertEqual(ev[0]["reason"], "wrong password")
+        self.assertEqual(ev[0]["ip"], "127.0.0.1")
+        self.assertEqual(ev[1]["reason"], "unknown user name")
+        for _ in range(webapp.MAX_FAILED_LOGINS):
+            self.login(password="wrong")
+        self.assertEqual(self.events()[-1]["event"], "sign-in blocked")
+        self.assertNotIn("correct horse", self.activity_log.read_text())
+
+    def test_session_actions_logged(self):
+        self.login()
+        self.client.get("/")
+        self.client.post("/destination", data={"csrf": self.csrf(), "dest": DST2})
+        self.client.post("/dry-run", data={"csrf": self.csrf(), "on": "1"})
+        html = self.client.post("/move/confirm", data={
+            "csrf": self.csrf(), "subscription_id": "SUB-ACTIVE", "quantity": "5"}).get_data(as_text=True)
+        self.client.get("/")   # walked away from the confirmation page
+        html = self.client.post("/move/confirm", data={
+            "csrf": self.csrf(), "subscription_id": "SUB-ACTIVE", "quantity": "5"}).get_data(as_text=True)
+        self.client.post("/move", data={"csrf": self.csrf(), "token": self.confirm_token(html)})
+        self.client.post("/move/confirm", data={"csrf": self.csrf(), "subscription_id": "SUB-ACTIVE",
+                                                "quantity": "999"})
+        self.client.post("/logout", data={"csrf": self.csrf()})
+        names = [e["event"] for e in self.events()]
+        for expected in ("signed in", "viewed licenses", "chose destination", "dry-run on",
+                         "move confirmation opened", "move cancelled", "move", "move refused", "signed out"):
+            self.assertIn(expected, names)
+        move = next(e for e in self.events() if e["event"] == "move")
+        self.assertEqual((move["result"], move["quantity"], move["dst_org_id"], move["user"]),
+                         ("DRY-RUN", "5", DST2, "alice"))
+        self.assertTrue(all(e["ip"] == "127.0.0.1" for e in self.events()))
+
+    def test_real_return_and_refused_config_logged(self):
+        self.login()
+        html = self.client.post("/return/confirm", data={
+            "csrf": self.csrf(), "amendment_id": "AM-KNOWN"}).get_data(as_text=True)
+        self.client.post("/return", data={"csrf": self.csrf(), "token": self.confirm_token(html)})
+        self.client.post("/configs", data={"csrf": self.csrf(), "config": "B.ini"})
+        ret = next(e for e in self.events() if e["event"] == "return")
+        self.assertEqual((ret["result"], ret["amendment_id"]), ("OK", "AM-KNOWN"))
+        self.assertEqual(self.events()[-1]["event"], "config refused")
+
+    def test_user_input_cannot_break_log_lines(self):
+        self.client.post("/login", data={"username": "evil\tname\nevent=signed in", "password": "x"})
+        self.assertEqual(len(self.activity_lines()), 1)
 
 
 if __name__ == "__main__":

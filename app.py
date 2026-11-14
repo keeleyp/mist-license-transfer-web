@@ -18,6 +18,7 @@ import argparse
 import configparser
 import getpass
 import logging
+import logging.handlers
 import secrets
 import sys
 import threading
@@ -31,11 +32,14 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import license_core as core
 from license_core import TransferError
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_WEB_CONF = BASE_DIR / "web.conf"
 CHANGE_LOG = BASE_DIR / "license_transfer_changes.log"
+ACTIVITY_LOG = BASE_DIR / "license_transfer_activity.log"
+ACTIVITY_LOG_MAX_BYTES = 5 * 1024 * 1024   # rotated at 5 MB, keeping 10 old files
+ACTIVITY_LOG_BACKUPS = 10
 DEFAULT_PORT = 5030
 
 MAX_FAILED_LOGINS = 5
@@ -178,6 +182,43 @@ class OrgNameCache:
             return entry[1]
 
 
+_activity_logger = logging.getLogger("mist_license_transfer_web.activity")
+_activity_logger.propagate = False   # its own file; the journal gets a copy below
+
+
+def setup_activity_log(path: Path):
+    """(Re)point the activity logger at `path`, a size-rotated file."""
+    for handler in list(_activity_logger.handlers):
+        _activity_logger.removeHandler(handler)
+        handler.close()
+    handler = logging.handlers.RotatingFileHandler(
+        path, maxBytes=ACTIVITY_LOG_MAX_BYTES, backupCount=ACTIVITY_LOG_BACKUPS, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    _activity_logger.addHandler(handler)
+    _activity_logger.setLevel(logging.INFO)
+
+
+def _clean(value) -> str:
+    """One log line per event: no tabs or newlines from user input."""
+    return " ".join(str(value).split())
+
+
+def activity(event: str, user=None, **fields):
+    """Writes one tab-separated line to the activity log:
+    time, client IP, user, event, then key=value details."""
+    if user is None:
+        user = session.get("user") or "-"
+    parts = [datetime.now().isoformat(timespec="seconds"), f"ip={request.remote_addr}",
+             f"user={_clean(user) or '-'}", f"event={event}"]
+    parts += [f"{k}={_clean(v)}" for k, v in fields.items() if v is not None and v != ""]
+    line = "\t".join(parts)
+    try:
+        _activity_logger.info(line)
+    except Exception as e:  # never let logging break a request
+        log.error("Could not write activity log: %s", e)
+    log.info("activity: %s", line)
+
+
 def write_change_log(user, config_name, op, details, outcome):
     line = (f"{datetime.now().isoformat(timespec='seconds')}\tuser={user}\tip={request.remote_addr}\t"
             f"config={config_name}\top={op}\t{details}\tresult={outcome}\n")
@@ -186,14 +227,18 @@ def write_change_log(user, config_name, op, details, outcome):
             f.write(line)
     except OSError as e:
         log.error("Could not write change log %s: %s", CHANGE_LOG, e)
-    log.info(line.strip())
+    fields = dict(kv.split("=", 1) for kv in details.split("\t") if "=" in kv)
+    event = {"amend": "move", "unamend": "return"}.get(op, op)
+    activity(event, user=user, config=config_name, **fields, result=outcome)
 
 
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 
-def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path = BASE_DIR) -> Flask:
+def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path = BASE_DIR,
+               activity_log: Path = None) -> Flask:
+    setup_activity_log(activity_log or ACTIVITY_LOG)
     app = Flask(__name__)
     app.secret_key = secrets.token_hex(32)  # new each start: restarting signs everyone out
     app.config.update(
@@ -234,6 +279,7 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
     def check_csrf():
         token = request.form.get("csrf", "")
         if not token or not secrets.compare_digest(token, session.get("csrf", "")):
+            activity("rejected form", path=request.path, reason="missing or expired form token")
             abort(400, "Form expired - go back, reload the page and try again.")
 
     def load_state(user, cfg):
@@ -310,6 +356,9 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
         if request.endpoint in ("login", "static"):
             return None
         if not current_user():
+            if session.get("user"):
+                # signed in as a user who has since been removed from web.conf
+                activity("signed out", reason="user no longer in web.conf")
             session.clear()
             return redirect(url_for("login"))
         session.permanent = True
@@ -330,14 +379,18 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         key = (request.remote_addr, username.lower())
+        agent = request.headers.get("User-Agent", "")[:200]
         if limiter.locked(key):
+            activity("sign-in blocked", user=username, reason="locked out after repeated wrong passwords")
             flash(f"Too many failed sign-ins - try again in {LOCKOUT_SECONDS // 60} minutes.", "error")
             return render_template("login.html", username=username), 429
         user = next((u for n, u in users.items() if n.lower() == username.lower()), None)
         ok = check_password_hash(user["password_hash"] if user else dummy_hash, password) and user is not None
         if not ok:
             limiter.fail(key)
-            log.warning("Failed sign-in for %r from %s", username, request.remote_addr)
+            activity("sign-in failed", user=username,
+                     reason="wrong password" if user else "unknown user name",
+                     locked_out="yes" if limiter.locked(key) else None)
             flash("Wrong user name or password.", "error")
             return render_template("login.html", username=username), 401
         limiter.clear(key)
@@ -345,12 +398,13 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
         session["user"] = user["name"]
         session["csrf"] = secrets.token_urlsafe(32)
         session.permanent = True
-        log.info("Signed in: %s from %s", user["name"], request.remote_addr)
+        activity("signed in", browser=agent)
         return redirect(url_for("index"))
 
     @app.post("/logout")
     def logout():
         check_csrf()
+        activity("signed out")
         session.clear()
         flash("Signed out.", "info")
         return redirect(url_for("login"))
@@ -365,10 +419,12 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
             check_csrf()
             name = request.form.get("config", "")
             if name not in available:
+                activity("config refused", config=name, reason="not assigned to this user")
                 abort(403)
             session["config"] = name
             session.pop("dest", None)
             session.pop("pending", None)
+            activity("chose config", config=name)
             return redirect(url_for("index"))
         rows = [(n, core.describe_config(p)) for n, p in available.items()]
         return render_template("configs.html", rows=rows)
@@ -378,6 +434,7 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
         check_csrf()
         session["dest"] = request.form.get("dest", "")
         session.pop("pending", None)
+        activity("chose destination", config=session.get("config"), dst_org_id=session["dest"])
         return redirect(url_for("index"))
 
     @app.post("/dry-run")
@@ -386,6 +443,7 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
         _, switchable = dry_run_state(current_user())
         if switchable:
             session["dry_run"] = request.form.get("on") == "1"
+            activity("dry-run on" if session["dry_run"] else "dry-run off (live)")
         return redirect(url_for("index"))
 
     # -- main page --------------------------------------------------------
@@ -407,8 +465,16 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
             cfg = current_config(user)
             state = load_state(user, cfg)
         except TransferError as e:
+            activity("error", config=session.get("config"), message=str(e).splitlines()[0])
             return render_template("error.html", message=str(e), config_error=True), 502
-        session.pop("pending", None)
+        pending = session.pop("pending", None)
+        if pending:
+            # back on the main page without confirming = the confirmation was cancelled
+            activity("move cancelled" if pending["op"] == "amend" else "return cancelled",
+                     config=pending.get("config"), subscription_id=pending.get("subscription_id"),
+                     amendment_id=pending.get("amendment_id"), quantity=pending.get("quantity"))
+        activity("viewed licenses", config=cfg["name"], dst_org_id=state["dest_id"],
+                 dry_run="yes" if dry_run_state(user)[0] else "no")
         nothing = not state["licenses"] and not state["known_amendments"] and not state["unknown_amendments"]
         return render_template("index.html", cfg=cfg, s=state, nothing=nothing,
                                no_data=not state["licenses_raw"])
@@ -438,12 +504,17 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
                 raise TransferError("That subscription has no units left to move any more - the table has been refreshed.")
             qty = validate_quantity(lic, request.form.get("quantity", ""))
         except TransferError as e:
+            activity("move refused", config=session.get("config"),
+                     subscription_id=request.form.get("subscription_id"),
+                     quantity=request.form.get("quantity"), reason=str(e).splitlines()[0])
             flash(str(e), "error")
             return redirect(url_for("index"))
         token = secrets.token_urlsafe(16)
         session["pending"] = {"token": token, "op": "amend", "config": cfg["name"],
                               "subscription_id": lic["subscription_id"],
                               "dst_org_id": state["dest_id"], "quantity": qty}
+        activity("move confirmation opened", config=cfg["name"], subscription_id=lic["subscription_id"],
+                 dst_org_id=state["dest_id"], quantity=qty)
         return render_template("confirm.html", title="Confirm move", token=token,
                                action=url_for("move_execute"), button="Move licenses",
                                rows=summary_move(cfg, state, lic, qty), warnings=[])
@@ -454,6 +525,7 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
         user = current_user()
         pending = session.pop("pending", None)
         if not pending or pending.get("op") != "amend" or pending.get("token") != request.form.get("token"):
+            activity("move not done", reason="confirmation expired or already used")
             flash("That confirmation has expired or was already used - nothing was changed.", "error")
             return redirect(url_for("index"))
         dry_run, _ = dry_run_state(user)
@@ -514,11 +586,16 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
             state = load_state(user, cfg)
             amendment, known = find_amendment(state, cfg, request.form.get("amendment_id", ""))
         except TransferError as e:
+            activity("return refused", config=session.get("config"),
+                     amendment_id=request.form.get("amendment_id"), reason=str(e).splitlines()[0])
             flash(str(e), "error")
             return redirect(url_for("index"))
         token = secrets.token_urlsafe(16)
         session["pending"] = {"token": token, "op": "unamend", "config": cfg["name"],
                               "amendment_id": amendment["amendment_id"]}
+        activity("return confirmation opened", config=cfg["name"], amendment_id=amendment["amendment_id"],
+                 subscription_id=amendment["subscription_id"], from_org_id=amendment["dst_org_id"],
+                 quantity=abs(amendment["quantity"]))
         warnings = [] if known else [
             "This API token can't access the destination org, so its name and current usage "
             "of these licenses can't be checked."]
@@ -532,6 +609,7 @@ def create_app(web_conf: dict, force_dry_run: bool = False, config_folder: Path 
         user = current_user()
         pending = session.pop("pending", None)
         if not pending or pending.get("op") != "unamend" or pending.get("token") != request.form.get("token"):
+            activity("return not done", reason="confirmation expired or already used")
             flash("That confirmation has expired or was already used - nothing was changed.", "error")
             return redirect(url_for("index"))
         dry_run, _ = dry_run_state(user)

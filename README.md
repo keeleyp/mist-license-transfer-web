@@ -13,8 +13,9 @@ and be used from any browser on your network.
 - **Move** a quantity (up to Avail) to the destination, or **Return** a
   previous move. Both go through a confirmation page first.
 - Dry-run mode walks through the same steps but never changes anything.
-- Every move and return (including dry-runs and failures) is written to
-  `license_transfer_changes.log`, with the user who made it.
+- An activity log records who signed in, from which IP address, and what
+  they did: every sign-in (and failed sign-in), page view, config and
+  destination choice, confirmation, move, return and sign-out.
 
 **Using the app:** see the [User Guide](docs/USER_GUIDE.md), which has screenshots. It's also available as a [PDF](docs/USER_GUIDE.pdf).
 
@@ -114,8 +115,59 @@ dry_run_only = true
   `web.conf` is missing, has no users, or names a config file that doesn't
   exist. It tells you what's wrong.
 
-`web.conf`, every `*.ini` and the change log are gitignored. Only the
+`web.conf`, every `*.ini` and the log files are gitignored. Only the
 `.example` templates are tracked.
+
+## Activity log
+
+`license_transfer_activity.log` in the app folder has one line per event:
+the time, the client's IP address, the user name, the event, and the
+details. Fields are separated by tabs. For example:
+
+```
+2026-11-14T10:02:11  ip=192.168.1.20  user=philip   event=signed in   browser=Mozilla/5.0 (Macintosh; ...)
+2026-11-14T10:02:12  ip=192.168.1.20  user=philip   event=viewed licenses   config=acme.ini  dst_org_id=a1d47e90-...  dry_run=no
+2026-11-14T10:03:40  ip=192.168.1.20  user=philip   event=move confirmation opened  config=acme.ini  subscription_id=SUB-0104411  dst_org_id=a1d47e90-...  quantity=10
+2026-11-14T10:03:45  ip=192.168.1.20  user=philip   event=move  config=acme.ini  subscription_id=SUB-0104411  dst_org_id=a1d47e90-...  quantity=10  result=OK
+2026-11-14T10:05:02  ip=192.168.1.20  user=philip   event=signed out
+2026-11-14T11:17:30  ip=192.168.1.57  user=admin    event=sign-in failed  reason=unknown user name
+```
+
+| Event | When |
+|---|---|
+| `signed in` / `signed out` | Successful sign-in (with the browser it came from) and **Sign out** |
+| `sign-in failed` | Wrong password or unknown user name (`reason=`); `locked_out=yes` on the attempt that triggers the lock |
+| `sign-in blocked` | A sign-in attempt while that user name is locked out from that address |
+| `chose config` / `config refused` | A config picked, or one the user isn't assigned to |
+| `viewed licenses` | The main page loaded (or refreshed) |
+| `chose destination` | The destination drop-down changed |
+| `dry-run on` / `dry-run off (live)` | The Mode switch |
+| `move confirmation opened` / `return confirmation opened` | A confirmation page shown (nothing changed yet) |
+| `move cancelled` / `return cancelled` | Back on the main page without confirming |
+| `move refused` / `return refused` | Rejected before the confirmation page (e.g. quantity over Avail), with `reason=` |
+| `move` / `return` | Confirmed, with `result=OK`, `DRY-RUN` or `FAILED: ...` |
+| `move not done` / `return not done` | A confirmation page reused, e.g. after Back or refresh |
+| `error` | The source org couldn't be read (invalid token, no access, network) |
+| `rejected form` | A form posted without a valid form token (an expired page, or a forged request) |
+
+Passwords are never logged. The log rotates at 5 MB, keeping 10 old files
+(`license_transfer_activity.log.1` … `.10`), so it can't fill the SD card.
+Moves and returns are also still written, one line each, to
+`license_transfer_changes.log`.
+
+Useful commands on the Pi:
+
+```bash
+cd ~/mist-license-transfer-web
+tail -f license_transfer_activity.log                     # watch live
+grep -P '\tevent=signed in' license_transfer_activity.log  # who signed in
+grep -P '\tevent=(move|return)\t' license_transfer_activity.log  # changes made
+grep 'sign-in failed' license_transfer_activity.log      # failed attempts
+```
+
+The IP is the address the request came from. If you ever put a reverse
+proxy in front of the app, every line will show the proxy's address
+instead.
 
 ## Options
 

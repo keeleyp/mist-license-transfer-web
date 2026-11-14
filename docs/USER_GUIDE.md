@@ -194,6 +194,8 @@ minutes. If you've forgotten your password, ask the admin to set a new one.
 | See the latest from Mist | **Refresh** or reload the page |
 | Finish | **Sign out** |
 
-Every move and return — including dry-runs and failures — is recorded with
-your user name in the app's change log, which the admin can check on the
-server.
+The app keeps an activity log that the admin can check on the server. It
+records your user name and IP address each time you sign in or out, view
+the licenses, change config, destination or mode, open, cancel or confirm a
+move or return (including dry-runs and failures), and every failed sign-in
+attempt. Passwords are never recorded.

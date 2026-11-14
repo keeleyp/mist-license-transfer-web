@@ -3,6 +3,7 @@
 !*.ini.example
 web.conf
 *.log
+*.log.[0-9]*
 __pycache__/
 *.pyc
 .venv/
